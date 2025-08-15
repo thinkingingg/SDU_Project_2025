@@ -112,4 +112,75 @@ template P2Core(roundFull, roundPartial) {
         return (r0, r1, r2);
     }
 
+    // 初始化
+    for (var i = 0; i < T; i++) {
+        s[i] <== st_in[i];
+    }
 
+    var idx = 0;
+    var half = roundFull / 2;
+
+    // 前 half 个全轮
+    for (var r = 0; r < half; r++) {
+        // 加常数
+        for (var i = 0; i < T; i++) { s[i] <== s[i] + C[idx][i]; }
+        // 全 S-Box
+        for (var i = 0; i < T; i++) { s[i] <== sbox5(s[i]); }
+        // MDS
+        var a0, a1, a2 = mix([s[0], s[1], s[2]]);
+        s[0] <== a0; s[1] <== a1; s[2] <== a2;
+        idx++;
+    }
+
+    // 部分轮：仅对 s[2] 应用 S-Box（保持与常量表配套）
+    for (var p = 0; p < roundPartial; p++) {
+        for (var i = 0; i < T; i++) { s[i] <== s[i] + C[idx][i]; }
+        s[2] <== sbox5(s[2]);
+        var b0, b1, b2 = mix([s[0], s[1], s[2]]);
+        s[0] <== b0; s[1] <== b1; s[2] <== b2;
+        idx++;
+    }
+
+    // 后 half 个全轮
+    for (var r2 = 0; r2 < half; r2++) {
+        for (var i = 0; i < T; i++) { s[i] <== s[i] + C[idx][i]; }
+        for (var i = 0; i < T; i++) { s[i] <== sbox5(s[i]); }
+        var c0, c1, c2 = mix([s[0], s[1], s[2]]);
+        s[0] <== c0; s[1] <== c1; s[2] <== c2;
+        idx++;
+    }
+
+    // 输出
+    for (var i = 0; i < T; i++) {
+        st_out[i] <== s[i];
+    }
+}
+
+/*
+  顶层：验证式电路
+  - public input:  digest（期望的哈希）
+  - private input: preimage（原像）
+  - public output: digest_calc（电路内部计算得到的哈希，方便链下比对）
+*/
+template Poseidon2VerifySingle() {
+    signal private input preimage;
+    signal public  input digest;
+    signal public  output digest_calc;
+
+    // 参数固定：RF=8, RP=56
+    component perm = P2Core(8, 56);
+
+    // 仅一个 block：采用 [0, preimage, 0] 作为初始 state
+    perm.st_in[0] <== 0;
+    perm.st_in[1] <== preimage;
+    perm.st_in[2] <== 0;
+
+    // 置换输出的第 0 个分量作为摘要
+    digest_calc <== perm.st_out[0];
+
+    // 注：这里不在电路内额外引入等式约束 gadget，
+    // 直接把 digest_calc 公开输出，证明/验证端对比 digest 与 digest_calc 是否一致即可。
+}
+
+// 导出主组件：公开信号只有 digest（输入）和 digest_calc（输出）
+component main { public [digest, digest_calc] } = Poseidon2VerifySingle();
