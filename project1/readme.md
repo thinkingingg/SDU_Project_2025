@@ -121,7 +121,7 @@ GCM（Galois/Counter Mode）将 CTR 模式加密与 GHASH 认证结合：
 
 * AESNI/GFNI/VPROLD 分支未运行是因为 CPU 不支持 
 
-### 四、总结
+## 四、总结
 
 本项目实现了从基础到高级优化的 SM4 加密器，并在 GCM 模式下结合 SM4 实现了高性能认证加密。  
 主要收获：
