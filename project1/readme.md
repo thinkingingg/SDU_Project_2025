@@ -105,11 +105,14 @@ GCM（Galois/Counter Mode）将 CTR 模式加密与 GHASH 认证结合：
 ## 三、运行结果与性能测试
 
 运行结果如下：
-    CPU Caps: AESNI=Y PCLMUL=Y AVX2=Y AVX512=N AVX512VL=N VPROLD=N
-    SelfTest Base=OK TTable=OK
-    GCM demo decrypt=OK tag[0..3]=ff662585
-    CTR(Base)   0.75 Gbps
-    CTR(Ttable) 1.03 Gbps
+
+```c++
+CPU Caps: AESNI=Y PCLMUL=Y AVX2=Y AVX512=N AVX512VL=N VPROLD=N 
+SelfTest Base=OK TTable=OK 
+GCM demo decrypt=OK tag[0..3]=ff662585 
+CTR(Base) 0.75 Gbps 
+CTR(Ttable) 1.03 Gbps
+```
 
 解释：
 
