@@ -1,7 +1,5 @@
 # SM4的软件实现和优化
 
-****
-
 ## 一、任务要求
 
 1. 从基本实现出发优化SM4的软件执行效率，至少应该覆盖T-table、AESNI以及最新的指令集（GFNI、VPROLD等）
@@ -20,19 +18,17 @@
 
 5. GCM 工作模式实现（基于 SM4 的 CTR + GHASH）
 
-**** 
-
 ## 二、算法原理
 
 ### 1. SM4基础
 
 SM4 是中国国家密码管理局发布的分组密码算法（国家标准 GB/T 32907-2016），分组长度为 128 位，密钥长度也为 128 位，加解密均为 32 轮迭代运算。它既可用于对称加密（ECB/CTR/CBC 等模式），也可与 GHASH 结合形成 GCM 认证加密模式。SM4 的加密过程在 GF(2) 上定义，使用以下符号：
 
-* 输入明文块：$X = (X_0, X_1, X_2, X_3)$，每个 $X_i$ 为 32 位无符号整数
+* 输入明文块：$ X = (X_0, X_1, X_2, X_3) $，每个 $X_i$ 为 32 位无符号整数
 
-* 密钥：$MK = (MK_0, MK_1, MK_2, MK_3)$
+* 密钥：$ MK = (MK_0, MK_1, MK_2, MK_3) $
 
-* 轮密钥：$RK_i, i = 0, 1, ..., 31$
+* 轮密钥：$ RK_i, i = 0, 1, ..., 31 $
 
 轮函数每轮使用非线性变换 $\tau$ 与线性变换 $L$：
 
@@ -52,21 +48,19 @@ $L$：线性变换 $L(B) = B \oplus (B \lll 2) \oplus (B \lll 10) \oplus (B \lll
 
 * CK[i] = 常量表，i=0..31
 
-轮密钥生成：$K_0..K_3 = MK_0..MK_3 \oplus FK_0..FK_3$
+轮密钥生成：$ K_0..K_3 = MK_0..MK_3 \oplus FK_0..FK_3 $
 
 其中 $L'(B) = B \oplus (B \lll 13) \oplus (B \lll 23)$。
 
 最终 $RK_i = K_{i+4}$。
 
-**** 
-
 ### 2. GCM工作模式
 
 GCM（Galois/Counter Mode）将 CTR 模式加密与 GHASH 认证结合：
 
-加密：$ C_i = P_i \oplus E_K(\text{CTR}_i)$
+加密：$ C_i = P_i \oplus E_K(\text{CTR}_i) $
 
-认证标签：$ T = \text{GHASH}_H(A \| C) \oplus E_K(J_0)$
+认证标签：$T = \text{GHASH}_H(A \| C) \oplus E_K(J_0)$
 
 * $H = E_K(0^{128})$   
 * GHASH 是 GF(2^{128}) 下的多项式乘法
@@ -77,11 +71,9 @@ GCM（Galois/Counter Mode）将 CTR 模式加密与 GHASH 认证结合：
 
 * GHASH 部分使用 PCLMULQDQ 指令（硬件 128 位 GF(2) 乘法）
 
-****
-
 ### 3. T-table 优化
 
-* 预先计算：$T[x] = L(\tau(x))$
+* 预先计算：$ T[x] = L(\tau(x)) $
   这样每次只需一次查表和异或即可完成 S 盒+线性变换
 
 * 优点：显著减少运算指令
@@ -110,11 +102,7 @@ GCM（Galois/Counter Mode）将 CTR 模式加密与 GHASH 认证结合：
 
 * 本项目在支持 CPU 上启用，检测方法为 CPUID 
 
-****
-
 ## 三、运行结果与性能测试
-
-------------
 
 运行结果如下：
     CPU Caps: AESNI=Y PCLMUL=Y AVX2=Y AVX512=N AVX512VL=N VPROLD=N
@@ -133,8 +121,6 @@ GCM（Galois/Counter Mode）将 CTR 模式加密与 GHASH 认证结合：
 
 * AESNI/GFNI/VPROLD 分支未运行是因为 CPU 不支持 
 
-****
-
 ### 四、总结
 
 本项目实现了从基础到高级优化的 SM4 加密器，并在 GCM 模式下结合 SM4 实现了高性能认证加密。  
@@ -145,4 +131,3 @@ GCM（Galois/Counter Mode）将 CTR 模式加密与 GHASH 认证结合：
 2. 了解了从查表到 SIMD 指令集的多层次优化方法
 
 3. 熟悉了 GCM 模式的认证加密流程及 PCLMULQDQ 的 GF(2) 乘法实现
-*  
