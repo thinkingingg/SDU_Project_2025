@@ -47,4 +47,47 @@ class ProtocolInitiator:
                 sum_cipher += cipher
         return sum_cipher + public_key.encrypt(0)  # 随机化
 
+class ProtocolResponder:
+    """协议响应方，持有键值对W"""
 
+    def __init__(self, items: List[Tuple[bytes, int]]):
+        self.items = items
+        self.private_exponent = secrets.randbelow(SUBGROUP_ORDER - 1) + 1
+        self.public_key, self.private_key = paillier.generate_paillier_keypair()
+
+    def second_phase(self, received_points: List[int]) -> Tuple[List[int], List[Tuple[int, paillier.EncryptedNumber]]]:
+        """第二阶段：验证集合和加密数据"""
+        verification_set = [pow(point, self.private_exponent, PRIME) for point in received_points]
+        encrypted_items = [
+            (pow(hash_to_group(key), self.private_exponent, PRIME),
+             self.public_key.encrypt(value))
+            for key, value in self.items
+        ]
+        return (sorted(verification_set, key=lambda _: secrets.randbits(128)),
+                sorted(encrypted_items, key=lambda _: secrets.randbits(128)))
+
+    def decrypt_result(self, ciphertext: paillier.EncryptedNumber) -> int:
+        """解密最终结果"""
+        return self.private_key.decrypt(ciphertext)
+
+
+def execute_protocol():
+    # 测试数据
+    initiator_data = [name.encode("utf-8") for name in ["张三", "李四", "王五"]]
+    responder_data = [(name.encode("utf-8"), score) for name, score in [("李四", 25), ("赵六", 20), ("张三", 50)]]
+
+    # 协议执行
+    party1 = ProtocolInitiator(initiator_data)
+    party2 = ProtocolResponder(responder_data)
+
+    phase1_result = party1.first_phase()
+    phase2_verification, phase2_pairs = party2.second_phase(phase1_result)
+
+    final_cipher = party1.third_phase(phase2_pairs, set(phase2_verification), party2.public_key)
+    intersection_sum = party2.decrypt_result(final_cipher)
+
+    print(f"交集元素关联值总和: {intersection_sum}")
+
+
+if __name__ == "__main__":
+    execute_protocol()
