@@ -124,3 +124,126 @@ class DigitalWatermark:
             arr = np.array(img) * factor
             return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
+        def adjust_contrast(img, factor=1.5):
+            arr = np.array(img).astype(np.float32)
+            mean = arr.mean()
+            adjusted = mean + (arr - mean) * factor
+            return Image.fromarray(np.clip(adjusted, 0, 255).astype(np.uint8))
+
+        def scale(img, factor=0.8):
+            w, h = img.size
+            scaled = img.resize((int(w * factor), int(h * factor)))
+            return scaled.resize(img.size)
+
+        # 定义攻击列表
+        attacks = [
+            ("Original", lambda x: x),
+            ("Gaussian Noise", lambda x: add_noise(x, 0.02)),
+            ("Cropping 10%", lambda x: crop(x, 0.1)),
+            ("Rotation 5°", lambda x: rotate(x, 5)),
+            ("Brightness +50%", lambda x: adjust_brightness(x, 1.5)),
+            ("Contrast +50%", lambda x: adjust_contrast(x, 1.5)),
+            ("Scaling 80%", lambda x: scale(x, 0.8))
+        ]
+
+        # 准备绘图
+        plt.figure(figsize=(15, 10))
+
+        for i, (name, attack_fn) in enumerate(attacks):
+            # 应用攻击
+            attacked_img = attack_fn(watermarked_img)
+
+            # 提取水印
+            extracted = self.extract(attacked_img, original_img)
+
+            # 计算相似度
+            orig_wm = np.array(watermark_img.resize(extracted.size))
+            ext_wm = np.array(extracted)
+            similarity = np.corrcoef(orig_wm.flatten(), ext_wm.flatten())[0, 1]
+
+            # 绘制结果
+            plt.subplot(3, 4, i + 1)
+            plt.imshow(attacked_img)
+            plt.title(f"{name}\nSimilarity: {similarity:.2f}")
+            plt.axis('off')
+
+            plt.subplot(3, 4, i + 5)
+            plt.imshow(extracted, cmap='gray')
+            plt.title("Extracted Watermark")
+            plt.axis('off')
+
+        plt.tight_layout()
+        plt.show()
+
+
+# 示例使用
+if __name__ == "__main__":
+    # 1. 创建示例图像和水印
+    img_size = (512, 512)
+    watermark_size = (128, 128)
+
+    # 创建宿主图像
+    host_img = Image.new('RGB', img_size, color=(70, 130, 180))
+    draw = ImageDraw.Draw(host_img)
+    try:
+        font = ImageFont.truetype("arial.ttf", 40)
+    except:
+        font = ImageFont.load_default()
+    draw.text((150, 220), "Sample Image", fill=(255, 255, 255), font=font)
+
+    # 创建水印图像
+    watermark_img = Image.new('L', watermark_size, color=0)
+    draw = ImageDraw.Draw(watermark_img)
+    try:
+        font = ImageFont.truetype("arial.ttf", 20)
+    except:
+        font = ImageFont.load_default()
+    draw.text((10, 50), "WATERMARK", fill=255, font=font)
+
+    # 2. 初始化水印系统
+    dw = DigitalWatermark(strength=0.2, radius=40)
+
+    # 3. 嵌入水印
+    watermarked_img = dw.embed(host_img, watermark_img)
+
+    # 4. 提取水印
+    extracted_watermark = dw.extract(watermarked_img, host_img)
+
+    # 5. 显示结果
+    plt.figure(figsize=(12, 6))
+
+    plt.subplot(2, 3, 1)
+    plt.imshow(host_img)
+    plt.title("Original Image")
+    plt.axis('off')
+
+    plt.subplot(2, 3, 2)
+    plt.imshow(watermark_img, cmap='gray')
+    plt.title("Watermark Image")
+    plt.axis('off')
+
+    plt.subplot(2, 3, 3)
+    plt.imshow(watermarked_img)
+    plt.title("Watermarked Image")
+    plt.axis('off')
+
+    plt.subplot(2, 3, 4)
+    plt.imshow(extracted_watermark, cmap='gray')
+    plt.title("Extracted Watermark")
+    plt.axis('off')
+
+    # 计算PSNR
+    mse = np.mean((np.array(host_img) - np.array(watermarked_img)) ** 2)
+    psnr = 10 * np.log10(255 ** 2 / mse) if mse != 0 else float('inf')
+
+    plt.subplot(2, 3, 5)
+    diff = np.array(watermarked_img) - np.array(host_img)
+    plt.imshow(np.clip(diff + 128, 0, 255).astype(np.uint8))
+    plt.title(f"Difference (PSNR: {psnr:.2f} dB)")
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+    # 6. 测试鲁棒性
+    dw.test_robustness(watermarked_img, host_img, watermark_img)
