@@ -289,3 +289,294 @@ static void ghash_mul_sw(uint64_t& Xh, uint64_t& Xl, uint64_t Hh, uint64_t Hl) {
 }
 
 
+#if defined(_MSC_VER)
+#include <wmmintrin.h>
+static inline void ghash_mul_pclmul(uint64_t& Xh, uint64_t& Xl, uint64_t Hh, uint64_t Hl) {
+    // 来自 Intel 应用笔记的标准做法
+    __m128i X = _mm_set_epi64x((long long)Xh, (long long)Xl);
+    __m128i H = _mm_set_epi64x((long long)Hh, (long long)Hl);
+
+    __m128i X0H1 = _mm_clmulepi64_si128(X, H, 0x01);
+    __m128i X1H0 = _mm_clmulepi64_si128(X, H, 0x10);
+    __m128i mid = _mm_xor_si128(X0H1, X1H0);
+
+    __m128i X0H0 = _mm_clmulepi64_si128(X, H, 0x00);
+    __m128i X1H1 = _mm_clmulepi64_si128(X, H, 0x11);
+
+    // Karatsuba 汇总：得到 256bit 产品的高/低/中间
+    __m128i T0 = X0H0;
+    __m128i T1 = _mm_xor_si128(_mm_slli_si128(mid, 8), _mm_srli_si128(mid, 8));
+    __m128i T2 = X1H1;
+
+    // 约简 (x^128 + x^7 + x^2 + x + 1)
+    // 把 T2 折叠到 T0/T1
+    __m128i V1 = _mm_srli_epi64(T2, 63);
+    __m128i V2 = _mm_srli_epi64(T2, 62);
+    __m128i V7 = _mm_srli_epi64(T2, 57);
+    __m128i R = _mm_xor_si128(T0, _mm_xor_si128(V1, _mm_xor_si128(V2, V7)));
+
+    __m128i T2s = _mm_slli_epi64(T2, 1);
+    __m128i T2s2 = _mm_slli_epi64(T2, 2);
+    __m128i T2s7 = _mm_slli_epi64(T2, 7);
+
+    R = _mm_xor_si128(R, T2s);
+    R = _mm_xor_si128(R, T2s2);
+    R = _mm_xor_si128(R, T2s7);
+
+    // 再把 T1 折叠
+    __m128i V1b = _mm_srli_epi64(T1, 63);
+    __m128i V2b = _mm_srli_epi64(T1, 62);
+    __m128i V7b = _mm_srli_epi64(T1, 57);
+
+    R = _mm_xor_si128(R, T1);
+    R = _mm_xor_si128(R, V1b);
+    R = _mm_xor_si128(R, V2b);
+    R = _mm_xor_si128(R, V7b);
+
+    __m128i T1s = _mm_slli_epi64(T1, 1);
+    __m128i T1s2 = _mm_slli_epi64(T1, 2);
+    __m128i T1s7 = _mm_slli_epi64(T1, 7);
+
+    R = _mm_xor_si128(R, T1s);
+    R = _mm_xor_si128(R, T1s2);
+    R = _mm_xor_si128(R, T1s7);
+
+    // R 即结果
+    uint64_t lo = (uint64_t)_mm_cvtsi128_si64(_mm_unpacklo_epi64(R, R));
+    uint64_t hi = (uint64_t)_mm_cvtsi128_si64(_mm_unpackhi_epi64(R, R));
+    Xh = hi; Xl = lo;
+}
+#endif
+
+static void ghash_update_block_sw(uint64_t& Yh, uint64_t& Yl, const uint8_t block[16], const GHashKey& H) {
+    uint64_t Xh, Xl; be_bytes_to_u128(block, Xh, Xl);
+    Yh ^= Xh; Yl ^= Xl;
+    ghash_mul_sw(Yh, Yl, H.Hh, H.Hl);
+}
+static void ghash_update_block_pclmul(uint64_t& Yh, uint64_t& Yl, const uint8_t block[16], const GHashKey& H) {
+#if defined(_MSC_VER)
+    uint64_t Xh, Xl; be_bytes_to_u128(block, Xh, Xl);
+    Yh ^= Xh; Yl ^= Xl;
+    ghash_mul_pclmul(Yh, Yl, H.Hh, H.Hl);
+#else
+    (void)block; (void)H; // fallback
+#endif
+}
+
+static void ghash_finalize_lengths(uint64_t& Yh, uint64_t& Yl,
+    uint64_t a_bits, uint64_t c_bits,
+    const GHashKey& H,
+    bool use_pclmul)
+{
+    uint8_t lenblk[16]{ 0 };
+    for (int i = 0; i < 8; i++) {
+        lenblk[7 - i] = uint8_t((a_bits >> (i * 8)) & 0xff);
+        lenblk[15 - i] = uint8_t((c_bits >> (i * 8)) & 0xff);
+    }
+    if (use_pclmul) ghash_update_block_pclmul(Yh, Yl, lenblk, H);
+    else            ghash_update_block_sw(Yh, Yl, lenblk, H);
+}
+
+//  GCM（SM4-CTR + GHASH）
+struct SM4_GCM {
+    SM4Key sk;
+    bool   use_ttab = false;
+    bool   use_vprold = false;
+    bool   use_pclmul = false;
+    GHashKey H;
+};
+
+static void sm4_gcm_init(SM4_GCM& ctx, const uint8_t key[16], bool use_ttab, const CPUCaps& caps) {
+    ctx.use_ttab = use_ttab;
+    ctx.use_vprold = caps.vprold;
+    ctx.use_pclmul = caps.pclmul;
+    if (use_ttab) Ttables_init();
+    sm4_key_schedule(key, ctx.sk);
+
+    // H = E_K(0^128)
+    uint8_t zero[16]{ 0 }, Hblk[16];
+    if (use_ttab) sm4_encrypt_block_ttab(ctx.sk, zero, Hblk);
+    else          sm4_encrypt_block_base(ctx.sk, zero, Hblk, ctx.use_vprold);
+    be_bytes_to_u128(Hblk, ctx.H.Hh, ctx.H.Hl);
+}
+
+static void sm4_gcm_encrypt(const SM4_GCM& ctx,
+    const uint8_t iv[12],
+    const uint8_t* aad, size_t aad_len,
+    const uint8_t* pt, size_t pt_len,
+    uint8_t* ct,
+    uint8_t tag[16])
+{
+    // J0 = IV || 0x00000001
+    uint8_t J0[16]{ 0 }; memcpy(J0, iv, 12); J0[15] = 1;
+
+    uint64_t Yh = 0, Yl = 0;
+    // AAD -> GHASH
+    size_t off = 0;
+    while (off + 16 <= aad_len) {
+        if (ctx.use_pclmul) ghash_update_block_pclmul(Yh, Yl, aad + off, ctx.H);
+        else                ghash_update_block_sw(Yh, Yl, aad + off, ctx.H);
+        off += 16;
+    }
+    if (aad_len % 16) {
+        uint8_t last[16]{ 0 };
+        size_t rem = aad_len % 16; memcpy(last, aad + off, rem);
+        if (ctx.use_pclmul) ghash_update_block_pclmul(Yh, Yl, last, ctx.H);
+        else                ghash_update_block_sw(Yh, Yl, last, ctx.H);
+    }
+
+    // CTR
+    sm4_ctr_encrypt(ctx.sk, ctx.use_ttab, ctx.use_vprold, iv, 1, pt, ct, pt_len);
+
+    // C -> GHASH
+    off = 0;
+    while (off + 16 <= pt_len) {
+        if (ctx.use_pclmul) ghash_update_block_pclmul(Yh, Yl, ct + off, ctx.H);
+        else                ghash_update_block_sw(Yh, Yl, ct + off, ctx.H);
+        off += 16;
+    }
+    if (pt_len % 16) {
+        uint8_t last[16]{ 0 };
+        size_t rem = pt_len % 16; memcpy(last, ct + off, rem);
+        if (ctx.use_pclmul) ghash_update_block_pclmul(Yh, Yl, last, ctx.H);
+        else                ghash_update_block_sw(Yh, Yl, last, ctx.H);
+    }
+    ghash_finalize_lengths(Yh, Yl, (uint64_t)aad_len * 8, (uint64_t)pt_len * 8, ctx.H, ctx.use_pclmul);
+
+    // Tag = E_K(J0) XOR Y
+    uint8_t EkJ0[16], Yblk[16];
+    if (ctx.use_ttab) sm4_encrypt_block_ttab(ctx.sk, J0, EkJ0);
+    else              sm4_encrypt_block_base(ctx.sk, J0, EkJ0, ctx.use_vprold);
+    u128_to_be_bytes(Yblk, Yh, Yl);
+    for (int i = 0; i < 16; i++) tag[i] = uint8_t(EkJ0[i] ^ Yblk[i]);
+}
+
+static bool sm4_gcm_decrypt(const SM4_GCM& ctx,
+    const uint8_t iv[12],
+    const uint8_t* aad, size_t aad_len,
+    const uint8_t* ct, size_t ct_len,
+    const uint8_t tag[16],
+    uint8_t* pt_out)
+{
+    // 计算期望 tag
+    uint8_t exp_tag[16];
+    {
+        uint8_t J0[16]{ 0 }; memcpy(J0, iv, 12); J0[15] = 1;
+        uint64_t Yh = 0, Yl = 0;
+        size_t off = 0;
+        while (off + 16 <= aad_len) {
+            if (ctx.use_pclmul) ghash_update_block_pclmul(Yh, Yl, aad + off, ctx.H);
+            else                ghash_update_block_sw(Yh, Yl, aad + off, ctx.H);
+            off += 16;
+        }
+        if (aad_len % 16) {
+            uint8_t last[16]{ 0 };
+            size_t rem = aad_len % 16; memcpy(last, aad + off, rem);
+            if (ctx.use_pclmul) ghash_update_block_pclmul(Yh, Yl, last, ctx.H);
+            else                ghash_update_block_sw(Yh, Yl, last, ctx.H);
+        }
+        off = 0;
+        while (off + 16 <= ct_len) {
+            if (ctx.use_pclmul) ghash_update_block_pclmul(Yh, Yl, ct + off, ctx.H);
+            else                ghash_update_block_sw(Yh, Yl, ct + off, ctx.H);
+            off += 16;
+        }
+        if (ct_len % 16) {
+            uint8_t last[16]{ 0 };
+            size_t rem = ct_len % 16; memcpy(last, ct + off, rem);
+            if (ctx.use_pclmul) ghash_update_block_pclmul(Yh, Yl, last, ctx.H);
+            else                ghash_update_block_sw(Yh, Yl, last, ctx.H);
+        }
+        ghash_finalize_lengths(Yh, Yl, (uint64_t)aad_len * 8, (uint64_t)ct_len * 8, ctx.H, ctx.use_pclmul);
+        uint8_t EkJ0[16], Yblk[16];
+        if (ctx.use_ttab) sm4_encrypt_block_ttab(ctx.sk, J0, EkJ0);
+        else              sm4_encrypt_block_base(ctx.sk, J0, EkJ0, ctx.use_vprold);
+        u128_to_be_bytes(Yblk, Yh, Yl);
+        for (int i = 0; i < 16; i++) exp_tag[i] = uint8_t(EkJ0[i] ^ Yblk[i]);
+    }
+    // 常数时间比较
+    unsigned diff = 0; for (int i = 0; i < 16; i++) diff |= (unsigned)(exp_tag[i] ^ tag[i]);
+    if (diff) return false;
+
+    sm4_ctr_encrypt(ctx.sk, ctx.use_ttab, ctx.use_vprold, iv, 1, ct, pt_out, ct_len);
+    return true;
+}
+
+// 自检（SM4 官方测试向量
+static bool self_test(Path p, bool use_vprold) {
+    const uint8_t key[16] = {
+        0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10
+    };
+    const uint8_t pt[16] = {
+        0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10
+    };
+    const uint8_t exp_ct[16] = {
+        0x68,0x1e,0xdf,0x34,0xd2,0x06,0x96,0x5e,0x86,0xb3,0xe9,0x4f,0x53,0x6e,0x42,0x46
+    };
+
+    SM4Key sk; sm4_key_schedule(key, sk);
+    uint8_t ct[16], back[16];
+    if (p == Path::TTable) {
+        Ttables_init(); sm4_encrypt_block_ttab(sk, pt, ct); sm4_decrypt_block_ttab(sk, ct, back);
+    }
+    else {
+        sm4_encrypt_block_base(sk, pt, ct, use_vprold); sm4_decrypt_block_base(sk, ct, back, use_vprold);
+    }
+    return memcmp(ct, exp_ct, 16) == 0 && memcmp(back, pt, 16) == 0;
+}
+
+// 简易基准
+static void bench(bool use_ttab, bool use_vprold) {
+    const size_t N = 1 << 23; // 8MB
+    std::vector<uint8_t> in(N), out(N);
+    for (size_t i = 0; i < N; i++) in[i] = uint8_t(i);
+    uint8_t key[16]{ 0 }; for (int i = 0; i < 16; i++) key[i] = uint8_t(i);
+    uint8_t iv[12]{ 0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc };
+
+    SM4Key sk; sm4_key_schedule(key, sk);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    sm4_ctr_encrypt(sk, use_ttab, use_vprold, iv, 1, in.data(), out.data(), N);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    double gbps = (double)N * 8 / (ms * 1e6);
+    std::cout << (use_ttab ? "CTR(Ttable) " : "CTR(Base)   ")
+        << std::fixed << std::setprecision(2) << gbps << " Gbps\n";
+}
+
+int main() {
+    CPUCaps caps = detect_caps();
+    std::cout << "CPU Caps: AESNI=" << (caps.aesni ? "Y" : "N")
+        << " PCLMUL=" << (caps.pclmul ? "Y" : "N")
+        << " AVX2=" << (caps.avx2 ? "Y" : "N")
+        << " AVX512=" << (caps.avx512 ? "Y" : "N")
+        << " AVX512VL=" << (caps.avx512vl ? "Y" : "N")
+        << " VPROLD=" << (caps.vprold ? "Y" : "N") << "\n";
+
+    bool ok_base = self_test(Path::Base, caps.vprold);
+    bool ok_ttab = self_test(Path::TTable, false);
+    std::cout << "SelfTest Base=" << (ok_base ? "OK" : "FAIL")
+        << " TTable=" << (ok_ttab ? "OK" : "FAIL") << "\n";
+    if (!ok_base || !ok_ttab) { std::cerr << "自检失败，退出\n"; return 1; }
+
+    // GCM 演示（自动选择 PCLMUL）
+    {
+        uint8_t key[16]{ 0 };
+        uint8_t iv[12]{ 0 };
+        const char* msg = "hello sm4-gcm!";
+        std::vector<uint8_t> pt(msg, msg + strlen(msg)), ct(pt.size()), back(pt.size());
+        uint8_t tag[16]{ 0 };
+        SM4_GCM ctx; sm4_gcm_init(ctx, key, true/*use T-table*/, caps);
+        sm4_gcm_encrypt(ctx, iv, nullptr, 0, pt.data(), pt.size(), ct.data(), tag);
+        bool ok = sm4_gcm_decrypt(ctx, iv, nullptr, 0, ct.data(), ct.size(), tag, back.data());
+        std::cout << "GCM demo decrypt=" << (ok && back == pt ? "OK" : "FAIL")
+            << " tag[0..3]="
+            << std::hex << std::setw(2) << std::setfill('0')
+            << (int)tag[0] << (int)tag[1] << (int)tag[2] << (int)tag[3]
+            << std::dec << "\n";
+    }
+
+    // 简易基准
+    bench(false, caps.vprold);
+    Ttables_init(); bench(true, false);
+    return 0;
+}
